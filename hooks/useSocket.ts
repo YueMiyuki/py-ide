@@ -9,7 +9,7 @@ export const useSocket = () => {
 
   useEffect(() => {
     // Use the WebSocket URL from the config file
-    const socketUrl = config.webSocketUrl || 'http://localhost:3001'
+    const socketUrl = config.webSocketUrl
     
     // Establish the WebSocket connection
     const newSocket = io(socketUrl, {

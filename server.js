@@ -22,8 +22,10 @@ const io = new Server(server, {
       if (!origin) return callback(null, true)
 
       if (config.corsOrigin.includes(origin)) {
+        console.log("Allow: " + origin)
         return callback(null, true) // Allow the origin
       } else {
+        console.log("Reject: " + origin)
         return callback(new Error('Not allowed by CORS')) // Block the origin
       }
     },
@@ -143,7 +145,7 @@ io.on('connection', (socket) => {
 })
 
 // Start the server using the port from config.json
-const PORT = process.env.PORT || config.socketPort || 3001
+const PORT = process.env.PORT || config.socketPort
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`)
 })
