@@ -1,0 +1,9 @@
+{
+    "socketPort": 3001,
+    "corsOrigin": [
+      "http://localhost:3000",
+      "https://staging.example.com",
+      "https://www.example.com"
+    ],
+    "webSocketUrl": "http://localhost:3001"
+  }
