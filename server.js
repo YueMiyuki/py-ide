@@ -6,72 +6,84 @@ const { v4: uuidv4 } = require('uuid')
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
-const config = require("./config.json")
+
+// Load configuration from config.json
+const config = require('./config.json')
 
 const app = express()
 const server = http.createServer(app)
 
+// Function to dynamically handle multiple CORS origins
 const io = new Server(server, {
-    cors: {
-      origin: (origin, callback) => {
-        if (!origin || config.corsOrigin.indexOf(origin) !== -1) {
-          callback(null, true) // If the origin is in the allowed list, accept it
-        } else {
-          callback(new Error('Not allowed by CORS')) // Block undesired origins
-        }
-      },
-      methods: ['GET', 'POST'],
+  cors: {
+    origin: (origin, callback) => {
+      console.log(`Origin: ${origin}`)
+      // Allow requests with no 'origin' (like Postman or curl requests)
+      if (!origin) return callback(null, true)
+
+      if (config.corsOrigin.includes(origin)) {
+        return callback(null, true) // Allow the origin
+      } else {
+        return callback(new Error('Not allowed by CORS')) // Block the origin
+      }
     },
-  })
+    methods: ['GET', 'POST'],
+  },
+})
 
-const runningProcesses = new Map()
-
-// Helper: Get client IP address.
-const getClientIp = (socket) => {
-  const ip = socket.handshake.headers['x-forwarded-for'] || socket.handshake.address
-  return ip?.split(',')[0]?.trim() || 'Unknown IP'
+// Helper to get client IP address.
+const getClientIp = socket => {
+  return (
+    socket.handshake.headers['x-forwarded-for'] || socket.handshake.address
+  )
+    .split(',')[0]
+    .trim()
 }
+
+// Store all running processes to stop and clean up correctly.
+const runningProcesses = new Map()
 
 io.on('connection', (socket) => {
   const clientIp = getClientIp(socket)
-  console.log(`A user connected from IP: ${clientIp}`)
+  console.log(`User connected from IP: ${clientIp}`)
 
+  // When 'run' event is received from the client
   socket.on('run', (code) => {
     const processId = uuidv4()
     const tempDir = os.tmpdir()
     const tempFilePath = path.join(tempDir, `${processId}.py`)
 
-    // Write the incoming code to a temporary .py file
+    // Save the incoming code to a temporary file
     fs.writeFileSync(tempFilePath, code)
 
-    // Spawn a Docker process using Alpine Python (without -t flag)
+    // Run the Python script inside a Docker container
     const pythonProcess = spawn('docker', [
       'run',
       '--rm',
-      '-i',        // Just keep stdin open (no TTY since it's not a terminal session)
+      '-i', // Keep stdin open for inputs (no TTY required)
       '-v', `${tempFilePath}:/app/script.py`,
       'python:3.9-alpine',
       'python', '/app/script.py',
     ])
 
-    // Register the running process
+    // Keep track of the running process to allow stopping it later
     runningProcesses.set(socket.id, { process: pythonProcess, id: processId, filePath: tempFilePath })
 
-    // Pipe stdout to the client
+    // Send output back to the client
     pythonProcess.stdout.on('data', (data) => {
       socket.emit('output', data.toString())
     })
 
-    // Pipe stderr to the client (e.g., for errors)
+    // Send errors back to the client
     pythonProcess.stderr.on('data', (data) => {
       socket.emit('output', data.toString())
     })
 
-    // Process exit handler
+    // When the process finishes, clean up
     pythonProcess.on('close', (code) => {
       socket.emit('exit', code)
 
-      // Cleanup temp file after execution
+      // Delete temp file after execution
       try {
         fs.unlinkSync(tempFilePath)
         console.log(`Temp file ${tempFilePath} deleted`)
@@ -79,25 +91,25 @@ io.on('connection', (socket) => {
         console.error('Error deleting temp file:', err)
       }
 
-      // Remove the process from the list
       runningProcesses.delete(socket.id)
     })
   })
 
-  // Handle user input sent from client
+  // Handle user inputs
   socket.on('input', (input) => {
     const runningProcess = runningProcesses.get(socket.id)
     if (runningProcess) {
-      runningProcess.process.stdin.write(input + '\n') // Send input to Python script via stdin
+      runningProcess.process.stdin.write(input + '\n') // Send input to the Python script
     }
   })
 
-  // Handle process termination
+  // Handle process termination request
   socket.on('stop', () => {
     const runningProcess = runningProcesses.get(socket.id)
     if (runningProcess) {
       runningProcess.process.kill()
 
+      // Clean up temp files and state
       try {
         fs.unlinkSync(runningProcess.filePath)
         console.log(`Temp file ${runningProcess.filePath} deleted`)
@@ -110,12 +122,14 @@ io.on('connection', (socket) => {
     }
   })
 
+  // Handle socket disconnect event
   socket.on('disconnect', () => {
     console.log(`User from IP ${clientIp} disconnected`)
     const runningProcess = runningProcesses.get(socket.id)
     if (runningProcess) {
       runningProcess.process.kill()
 
+      // Clean up
       try {
         fs.unlinkSync(runningProcess.filePath)
         console.log(`Temp file ${runningProcess.filePath} deleted`)
@@ -128,6 +142,7 @@ io.on('connection', (socket) => {
   })
 })
 
+// Start the server using the port from config.json
 const PORT = process.env.PORT || config.socketPort || 3001
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`)
