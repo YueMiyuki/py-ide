@@ -238,7 +238,7 @@ export default function PythonEditor() {
                 isRunning={isRunning}
                 onInput={(input) => {
                   // Echo the input the user typed in the UI
-                  setOutput((prev) => prev + `<USER WSS> ${input}\n`);
+                  setOutput((prev) => prev + ` <USER WSS> \"${input}\"`);
                   socket?.emit("input", input);
 
                   // Reset the 60-second timeout upon new input
