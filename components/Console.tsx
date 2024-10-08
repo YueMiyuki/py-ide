@@ -26,7 +26,6 @@ export const Console = forwardRef<HTMLDivElement, ConsoleProps>(
         transition={{ duration: 0.3 }}
       >
         <div className="flex-1 overflow-auto" ref={ref}>
-          {/* Display the accumulated output, including user's input and server responses */}
           <pre className="whitespace-pre-wrap">
             {output}    
           </pre>
@@ -42,8 +41,8 @@ export const Console = forwardRef<HTMLDivElement, ConsoleProps>(
               onKeyDown={handleKeyDown}
               className="flex-1 bg-transparent outline-none text-white placeholder-gray-500"
               placeholder="Enter input..."
-              autoFocus // Focus input field when it becomes visible
-              disabled={!isRunning} // Disable when the process is not running
+              autoFocus
+              disabled={!isRunning}
             />
           </div>
         ) : (
