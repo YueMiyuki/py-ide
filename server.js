@@ -64,7 +64,7 @@ io.on('connection', (socket) => {
       '--rm',
       '-i', // Keep stdin open for inputs (no TTY required)
       '-v', `${tempFilePath}:/app/script.py`,
-      'python:3.9-alpine',
+      'python:3.9-ide',
       'python', '/app/script.py',
     ])
 
