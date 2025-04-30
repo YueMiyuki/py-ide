@@ -10,30 +10,33 @@ const os = require('os')
 // Load configuration from config.json
 const config = require('./config.json')
 
+// Helper function for timestamped logs
+const logWithTimestamp = (message) => {
+  const timestamp = new Date().toISOString()
+  console.log(`[${timestamp}] ${message}`)
+}
+
 const app = express()
 const server = http.createServer(app)
 
-// Function to dynamically handle multiple CORS origins
 const io = new Server(server, {
   cors: {
     origin: (origin, callback) => {
-      console.log(`Origin: ${origin}`)
-      // Allow requests with no 'origin' (like Postman or curl requests)
+      logWithTimestamp(`Origin check: ${origin}`)
       if (!origin) return callback(null, true)
-
+      
       if (config.corsOrigin.includes(origin)) {
-        console.log("Allow: " + origin)
-        return callback(null, true) // Allow the origin
+        logWithTimestamp(`Allowed origin: ${origin}`)
+        callback(null, true)
       } else {
-        console.log("Reject: " + origin)
-        return callback(new Error('Not allowed by CORS')) // Block the origin
+        logWithTimestamp(`Rejected origin: ${origin}`)
+        callback(new Error('Not allowed by CORS'))
       }
     },
     methods: ['GET', 'POST'],
   },
 })
 
-// Helper to get client IP address.
 const getClientIp = socket => {
   return (
     socket.handshake.headers['x-forwarded-for'] || socket.handshake.address
@@ -42,110 +45,151 @@ const getClientIp = socket => {
     .trim()
 }
 
-// Store all running processes to stop and clean up correctly.
 const runningProcesses = new Map()
+
+// Resource limits for containers
+const DOCKER_RESOURCE_LIMITS = {
+  CPU: "1",       // Max 1 CPU core
+  MEMORY: "512m", // Max 512MB RAM
+  SWAP: "512m"
+}
 
 io.on('connection', (socket) => {
   const clientIp = getClientIp(socket)
-  console.log(`User connected from IP: ${clientIp}`)
+  logWithTimestamp(`New connection from ${clientIp} (socket ID: ${socket.id})`)
 
-  // When 'run' event is received from the client
   socket.on('run', (code) => {
     const processId = uuidv4()
     const tempDir = os.tmpdir()
     const tempFilePath = path.join(tempDir, `${processId}.py`)
 
-    // Save the incoming code to a temporary file
-    fs.writeFileSync(tempFilePath, code)
+    try {
+      fs.writeFileSync(tempFilePath, code)
+      logWithTimestamp(`Created temp file: ${tempFilePath}`)
+    } catch (err) {
+      logWithTimestamp(`File creation error: ${err.message}`)
+      socket.emit('output', 'Error: Failed to create temporary file')
+      return
+    }
 
-    // Run the Python script inside a Docker container
-    const pythonProcess = spawn('docker', [
+    const dockerArgs = [
       'run',
       '--rm',
-      '-i', // Keep stdin open for inputs (no TTY required)
+      '-i',
+      '--cpus', DOCKER_RESOURCE_LIMITS.CPU,
+      '--memory', DOCKER_RESOURCE_LIMITS.MEMORY,
+      '--memory-swap', DOCKER_RESOURCE_LIMITS.SWAP,
       '-v', `${tempFilePath}:/app/script.py`,
       'python:3.9-ide',
       'python', '/app/script.py',
-    ])
+    ]
 
-    // Keep track of the running process to allow stopping it later
-    runningProcesses.set(socket.id, { process: pythonProcess, id: processId, filePath: tempFilePath })
+    logWithTimestamp(`Starting container for ${clientIp} with args: ${dockerArgs.join(' ')}`)
+    
+    const pythonProcess = spawn('docker', dockerArgs)
 
-    // Send output back to the client
+    const timeoutId = setTimeout(() => {
+      const runningProcess = runningProcesses.get(socket.id)
+      if (runningProcess) {
+        logWithTimestamp(`Timeout reached for ${clientIp} (process: ${processId})`)
+        pythonProcess.kill()
+        socket.emit('output', '\nProcess terminated: 60-second timeout reached\n')
+        socket.emit('exit', 124)
+        
+        try {
+          fs.unlinkSync(runningProcess.filePath)
+          logWithTimestamp(`Cleaned temp file after timeout: ${tempFilePath}`)
+        } catch (err) {
+          logWithTimestamp(`Timeout cleanup error: ${err.message}`)
+        }
+        
+        runningProcesses.delete(socket.id)
+      }
+    }, 60000)
+
+    runningProcesses.set(socket.id, {
+      process: pythonProcess,
+      id: processId,
+      filePath: tempFilePath,
+      timeoutId,
+      clientIp
+    })
+
     pythonProcess.stdout.on('data', (data) => {
       socket.emit('output', data.toString())
     })
 
-    // Send errors back to the client
     pythonProcess.stderr.on('data', (data) => {
       socket.emit('output', data.toString())
     })
 
-    // When the process finishes, clean up
     pythonProcess.on('close', (code) => {
-      socket.emit('exit', code)
-
-      // Delete temp file after execution
-      try {
-        fs.unlinkSync(tempFilePath)
-        console.log(`Temp file ${tempFilePath} deleted`)
-      } catch (err) {
-        console.error('Error deleting temp file:', err)
+      const runningProcess = runningProcesses.get(socket.id)
+      if (runningProcess) {
+        logWithTimestamp(`Process ${processId} exited with code ${code} (${clientIp})`)
+        clearTimeout(runningProcess.timeoutId)
+        
+        try {
+          fs.unlinkSync(runningProcess.filePath)
+          logWithTimestamp(`Cleaned temp file: ${tempFilePath}`)
+        } catch (err) {
+          logWithTimestamp(`Exit cleanup error: ${err.message}`)
+        }
+        
+        runningProcesses.delete(socket.id)
+        socket.emit('exit', code)
       }
-
-      runningProcesses.delete(socket.id)
     })
   })
 
-  // Handle user inputs
   socket.on('input', (input) => {
     const runningProcess = runningProcesses.get(socket.id)
     if (runningProcess) {
-      runningProcess.process.stdin.write(input + '\n') // Send input to the Python script
+      runningProcess.process.stdin.write(input + '\n')
     }
   })
 
-  // Handle process termination request
   socket.on('stop', () => {
     const runningProcess = runningProcesses.get(socket.id)
     if (runningProcess) {
+      logWithTimestamp(`Manual stop for ${runningProcess.clientIp} (process: ${runningProcess.id})`)
       runningProcess.process.kill()
-
-      // Clean up temp files and state
+      clearTimeout(runningProcess.timeoutId)
+      
       try {
         fs.unlinkSync(runningProcess.filePath)
-        console.log(`Temp file ${runningProcess.filePath} deleted`)
+        logWithTimestamp(`Cleaned temp file after manual stop: ${runningProcess.filePath}`)
       } catch (err) {
-        console.error('Error deleting temp file:', err)
+        logWithTimestamp(`Manual stop cleanup error: ${err.message}`)
       }
-
+      
       runningProcesses.delete(socket.id)
       socket.emit('exit', 1)
     }
   })
 
-  // Handle socket disconnect event
   socket.on('disconnect', () => {
-    console.log(`User from IP ${clientIp} disconnected`)
     const runningProcess = runningProcesses.get(socket.id)
+    logWithTimestamp(`Disconnect from ${clientIp} ${runningProcess ? '(process running)' : ''}`)
+    
     if (runningProcess) {
       runningProcess.process.kill()
-
-      // Clean up
+      clearTimeout(runningProcess.timeoutId)
+      
       try {
         fs.unlinkSync(runningProcess.filePath)
-        console.log(`Temp file ${runningProcess.filePath} deleted`)
+        logWithTimestamp(`Cleaned temp file after disconnect: ${runningProcess.filePath}`)
       } catch (err) {
-        console.error('Error deleting temp file:', err)
+        logWithTimestamp(`Disconnect cleanup error: ${err.message}`)
       }
-
+      
       runningProcesses.delete(socket.id)
     }
   })
 })
 
-// Start the server using the port from config.json
 const PORT = process.env.PORT || config.socketPort
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`)
+  logWithTimestamp(`Server started on port ${PORT}`)
+  logWithTimestamp(`Container resource limits: ${JSON.stringify(DOCKER_RESOURCE_LIMITS)}`)
 })
